@@ -1,0 +1,30 @@
+[package]
+name = "jellyfin-music-rs"
+version = "0.1.0"
+edition = "2024"
+# File::try_lock, used for the single-instance lock, is stable since 1.89.
+rust-version = "1.89"
+description = "Mirror the music library of a Jellyfin server into a local folder"
+license = "GPL-3.0-only"
+readme = "README.md"
+repository = "https://github.com/Gren-95/jellyfin-music-rs"
+keywords = ["jellyfin", "music", "sync", "self-hosted", "cli"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[[bin]]
+name = "jellyfin-music-rs"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+indicatif = "0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+# Smaller release binaries: link-time optimisation across all crates, no debug
+# symbols.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

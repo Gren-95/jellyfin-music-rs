@@ -1,0 +1,54 @@
+name: Monthly checkup
+
+# GitHub's cron has no "every 30 days"; the 1st of each month is the closest.
+# Also runs by hand from the Actions tab. The checks are in
+# .github/scripts/checkup.sh. Findings become one issue labelled "checkup" (or
+# a comment on it while it is still open); nothing is filed when all is current.
+on:
+  schedule:
+    - cron: "23 5 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  checkup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the newest stable Rust and cargo-audit
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          cargo install cargo-audit --locked
+
+      - name: Check
+        run: .github/scripts/checkup.sh "$RUNNER_TEMP/checkup.md"
+
+      # Only this step gets the token: the Check step builds freshly updated crates.
+      - name: Report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          report="$RUNNER_TEMP/checkup.md"
+          if [[ ! -s "$report" ]]; then
+            echo "All clear: nothing to fix or update." >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          cat "$report" >>"$GITHUB_STEP_SUMMARY"
+          printf -- '---\nFound by [the monthly checkup](%s).\n' "$RUN_URL" >>"$report"
+          gh label create checkup --color 0e8a16 --description "Findings of the monthly checkup" --force
+          open=$(gh issue list --label checkup --state open --json number --jq '.[0].number // empty')
+          if [[ -n "$open" ]]; then
+            gh issue comment "$open" --body-file "$report"
+          else
+            gh issue create --title "Checkup $(date +%Y-%m)" --label checkup --body-file "$report"
+          fi

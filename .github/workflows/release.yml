@@ -1,0 +1,94 @@
+name: Release
+
+# Pushing a tag vX.Y.Z that matches the version in Cargo.toml builds static
+# Linux binaries (musl) and publishes them with their SHA-256 checksums. The
+# release stays a draft until every build is uploaded, so a failed build never
+# shows up as a half-empty release: delete the draft and the tag, fix, tag again.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [[ "$TAG" != "v$version" ]]; then
+            echo "::error::Tag $TAG does not match version $version in Cargo.toml"
+            exit 1
+          fi
+
+      - name: Create the draft release
+        run: |
+          gh release create "$TAG" --draft --verify-tag --title "jellyfin-music-rs $TAG" --generate-notes \
+            --notes "Static Linux builds for x86_64 and aarch64: see [Install](https://github.com/$GH_REPO#install)."
+
+  build:
+    needs: draft
+    # Ubuntu 24.04 on purpose: the 26.04 image behind ubuntu-latest has no
+    # Ubuntu archive in apt, so musl-tools cannot be installed there.
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      TARGET: ${{ matrix.arch }}-unknown-linux-musl
+      ASSET: jellyfin-music-rs-${{ matrix.arch }}-linux.tar.gz
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust for musl
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q musl-tools
+          rustup toolchain install stable --profile minimal --target "$TARGET"
+          rustup default stable
+
+      - run: cargo build --release --locked --target "$TARGET"
+
+      - name: Check the binary is static and runs
+        run: |
+          bin="target/$TARGET/release/jellyfin-music-rs"
+          file "$bin"
+          if readelf -d "$bin" | grep -q NEEDED; then
+            echo "::error::$bin links shared libraries"
+            exit 1
+          fi
+          test "$("$bin" --version)" = "jellyfin-music-rs ${TAG#v}"
+
+      - name: Upload
+        run: |
+          tar -czf "$ASSET" -C "target/$TARGET/release" jellyfin-music-rs -C "$GITHUB_WORKSPACE" LICENSE README.md
+          gh release upload "$TAG" "$ASSET"
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add the checksums and publish
+        run: |
+          gh release download "$TAG" --pattern 'jellyfin-music-rs-*.tar.gz' --dir assets
+          (cd assets && sha256sum jellyfin-music-rs-*.tar.gz >SHA256SUMS && cat SHA256SUMS)
+          gh release upload "$TAG" assets/SHA256SUMS
+          gh release edit "$TAG" --draft=false --latest
