@@ -1,5 +1,5 @@
 //! The `sync` command: mirrors the server's music library into the music folder, in this order:
-//! lock, credentials, reachability, library, moves from the flat layout, downloads, covers,
+//! lock, credentials, reachability, library, moves from the other layout, downloads, covers,
 //! playlists, deletions. Every early stop leaves the music folder as it was.
 
 mod covers_playlists;
@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use crate::account;
 use crate::api::{self, ApiError, Client, Item};
 use crate::config::Credentials;
-use crate::layout::{self, Track};
+use crate::layout::{self, Layout, Track};
 use crate::lock::{self, Lock, LockError};
 use crate::output::{Reporter, Summary};
 use crate::prune::{self, Expected, Kind};
@@ -31,6 +31,8 @@ pub struct Options {
     pub covers: bool,
     pub playlists: bool,
     pub max_delete: u8,
+    /// Every track straight in the music folder, without covers or playlists.
+    pub flat: bool,
 }
 
 /// What every step needs.
@@ -88,7 +90,8 @@ fn sync(
         ));
     }
     stop_if_interrupted()?;
-    let tracks = layout::plan(items);
+    let layout = if options.flat { Layout::Flat } else { Layout::Albums };
+    let tracks = layout::plan(items, layout);
     summary.tracks = tracks.len();
     reporter.line(&format!("Found {} tracks on the server", tracks.len()));
 
@@ -104,13 +107,16 @@ fn sync(
     }
     let (jobs, mut synced, moved_away) = downloads::prepare(&context, &tracks, reporter, summary);
     downloads::download_all(&context, &tracks, &jobs, &mut synced, reporter, summary)?;
-    if options.covers {
+    if layout == Layout::Albums && options.covers {
         covers_playlists::sync_covers(&context, &tracks, &synced, reporter, summary)?;
     }
-    let playlist_files = if options.playlists {
-        covers_playlists::sync_playlists(&context, &tracks, &synced, reporter, summary)?
-    } else {
-        None
+    let playlist_files = match layout {
+        // The flat layout has no playlists: those an album-layout sync wrote go.
+        Layout::Flat => Some(HashSet::new()),
+        Layout::Albums if options.playlists => {
+            covers_playlists::sync_playlists(&context, &tracks, &synced, reporter, summary)?
+        }
+        Layout::Albums => None,
     };
     remove_stale(&context, &tracks, playlist_files, moved_away, reporter, summary)
 }
@@ -196,9 +202,15 @@ fn remove_stale(
 ) -> Result<(), Failure> {
     stop_if_interrupted()?;
     let dir = &context.dir;
+    let album_folders = if context.options.flat {
+        // No covers in the flat layout: those an album-layout sync wrote go.
+        HashSet::new()
+    } else {
+        tracks.iter().map(|track| track.album_folder(dir)).collect()
+    };
     let expected = Expected {
         tracks: tracks.iter().map(|track| track.path(dir)).collect(),
-        album_folders: tracks.iter().map(|track| track.album_folder(dir)).collect(),
+        album_folders,
         playlists: playlist_files,
         moved_away,
     };

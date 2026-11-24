@@ -109,6 +109,7 @@ pub fn fetch(client: &Client, job: &CoverJob) -> Result<bool, ApiError> {
 mod tests {
     use super::*;
     use crate::fsutil::testdir::TestDir;
+    use crate::layout::Layout;
 
     /// A track; `album` is `(album id, album has an image)`, `image` whether the track has one.
     fn track(folder: (&str, &str), file: &str, album: Option<(&str, bool)>, image: bool) -> Track {
@@ -123,8 +124,9 @@ mod tests {
             size: None,
             artist_dir: folder.0.to_string(),
             album_dir: folder.1.to_string(),
-            file_name: file.to_string(),
-            flat_name: file.to_string(),
+            layout: Layout::Albums,
+            album_file_name: file.to_string(),
+            flat_file_name: file.to_string(),
         }
     }
 

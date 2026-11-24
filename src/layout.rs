@@ -1,8 +1,10 @@
-//! Where each server track goes: `<Artist>/<Album>/<Title>.<ext>` below the music folder, with
-//! names sanitised exactly like the bash script did for ordinary names. Tracks that would land on
-//! the same file are numbered, so every track keeps a file of its own.
+//! Where each server track goes: `<Artist>/<Album>/<Title>.<ext>` below the music folder, or
+//! `<Title>.<ext>` straight in it in the flat layout, with names sanitised exactly like the bash
+//! script did for ordinary names. Tracks that would land on the same file are numbered, so every
+//! track keeps a file of its own.
 
 use std::collections::HashSet;
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
 use crate::api::Item;
@@ -47,6 +49,24 @@ fn extension(server_path: Option<&str>) -> String {
     }
 }
 
+/// How the tracks are arranged in the music folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// `Artist/Album/Title.ext`, with covers and playlists beside the tracks.
+    Albums,
+    /// `Title.ext` straight in the music folder, without covers or playlists.
+    Flat,
+}
+
+impl Layout {
+    fn other(self) -> Layout {
+        match self {
+            Layout::Albums => Layout::Flat,
+            Layout::Flat => Layout::Albums,
+        }
+    }
+}
+
 /// A server track and its place in the local folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Track {
@@ -63,18 +83,29 @@ pub struct Track {
     pub run_time_ticks: Option<i64>,
     /// The size the server lists, when known.
     pub size: Option<u64>,
+    /// The layout the sync uses.
+    pub layout: Layout,
     pub artist_dir: String,
     pub album_dir: String,
-    /// `Title.ext`, or `Title (2).ext` when another track has the same path.
-    pub file_name: String,
-    /// `Title.ext` without any number: the name the old flat layout used.
-    pub flat_name: String,
+    /// `Title.ext` in the album folder, or `Title (2).ext` when another track of the album has
+    /// the same name.
+    pub album_file_name: String,
+    /// `Title.ext` in the music folder, or `Title (2).ext` when any other track has the same name.
+    pub flat_file_name: String,
 }
 
 impl Track {
-    /// `Artist/Album/Title.ext`, with `/` as the separator.
+    fn relative_in(&self, layout: Layout) -> String {
+        match layout {
+            Layout::Albums => format!("{}/{}/{}", self.artist_dir, self.album_dir, self.album_file_name),
+            Layout::Flat => self.flat_file_name.clone(),
+        }
+    }
+
+    /// The path below the music folder, with `/` as the separator: `Artist/Album/Title.ext`, or
+    /// `Title.ext` in the flat layout.
     pub fn relative(&self) -> String {
-        format!("{}/{}/{}", self.artist_dir, self.album_dir, self.file_name)
+        self.relative_in(self.layout)
     }
 
     pub fn album_folder(&self, music_dir: &Path) -> PathBuf {
@@ -82,7 +113,13 @@ impl Track {
     }
 
     pub fn path(&self, music_dir: &Path) -> PathBuf {
-        self.album_folder(music_dir).join(&self.file_name)
+        music_dir.join(self.relative())
+    }
+
+    /// Where the other layout puts the track. A file found there is moved into place instead of
+    /// downloaded again, so switching layouts costs no downloads.
+    pub fn other_path(&self, music_dir: &Path) -> PathBuf {
+        music_dir.join(self.relative_in(self.layout.other()))
     }
 
     /// `Artist — Title`, as the bash script printed tracks.
@@ -101,79 +138,128 @@ struct Draft {
 }
 
 impl Draft {
-    fn new(item: Item) -> Self {
+    fn new(item: Item, layout: Layout) -> Self {
         let size = item.size();
         let artist = item.album_artist.unwrap_or_else(|| UNKNOWN_ARTIST.to_string());
         let album = item.album.unwrap_or_else(|| UNKNOWN_ALBUM.to_string());
         let title = item.name.unwrap_or_else(|| UNKNOWN_TRACK.to_string());
         let stem = sanitize(&title, UNKNOWN_TRACK);
-        let extension = extension(item.path.as_deref());
-        let file_name = format!("{stem}.{extension}");
         Draft {
             track: Track {
                 id: item.id,
                 artist_dir: sanitize(&artist, UNKNOWN_ARTIST),
                 album_dir: sanitize(&album, UNKNOWN_ALBUM),
                 artist,
-                title,
                 album_has_image: item.album_id.is_some() && item.album_primary_image_tag.is_some(),
                 has_image: item.image_tags.is_some_and(|tags| tags.primary.is_some()),
                 album_id: item.album_id,
                 run_time_ticks: item.run_time_ticks,
                 size,
-                flat_name: file_name.clone(),
-                file_name,
+                layout,
+                album_file_name: String::new(),
+                flat_file_name: String::new(),
+                title,
             },
             stem,
-            extension,
+            extension: extension(item.path.as_deref()),
             server_path: item.path.unwrap_or_default(),
             index_number: item.index_number,
         }
     }
 
-    /// The local path first, then the server path, track number and id, so the order (and the
-    /// numbering of collisions) is the same on every run.
-    fn sort_key(&self) -> (&str, &str, &str, &str, Option<i64>, &str) {
-        (
-            &self.track.artist_dir,
-            &self.track.album_dir,
-            &self.track.file_name,
-            &self.server_path,
-            self.index_number,
-            &self.track.id,
-        )
+    /// `Title.ext`, before any numbering.
+    fn natural_name(&self) -> String {
+        format!("{}.{}", self.stem, self.extension)
+    }
+
+    fn numbered_name(&self, number: usize) -> String {
+        format!("{} ({number}).{}", self.stem, self.extension)
+    }
+
+    /// The server path, track number and id: what orders tracks that share a local path, so the
+    /// numbering is the same on every run.
+    fn tie_break(&self) -> (&str, Option<i64>, &str) {
+        (&self.server_path, self.index_number, &self.track.id)
     }
 }
 
-/// Maps server tracks to local files, sorted by local path. Of the tracks that map to the same
-/// file, the first (by server path, then track number, then id) keeps the name and the others
-/// get ` (2)`, ` (3)`, … before the extension, skipping names another track already has.
-pub fn plan(items: Vec<Item>) -> Vec<Track> {
-    let mut drafts: Vec<Draft> = items.into_iter().map(Draft::new).collect();
-    drafts.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
-
-    let key =
-        |track: &Track, file_name: &str| (track.artist_dir.clone(), track.album_dir.clone(), file_name.to_string());
-    let mut taken: HashSet<(String, String, String)> = HashSet::new();
+/// Gives each draft a file name that is unique within its slot (`slot` turns a draft and a file
+/// name into what may not repeat). Drafts are visited in `order`: the first keeps `Title.ext`,
+/// later ones get ` (2)`, ` (3)`, … before the extension, skipping names another draft already
+/// has.
+fn number_collisions<K: Eq + Hash>(drafts: &[Draft], order: &[usize], slot: impl Fn(&Draft, &str) -> K) -> Vec<String> {
+    let mut names = vec![String::new(); drafts.len()];
+    let mut taken = HashSet::new();
     let mut duplicates = Vec::new();
-    for (index, draft) in drafts.iter().enumerate() {
-        if !taken.insert(key(&draft.track, &draft.track.file_name)) {
+    for &index in order {
+        let name = drafts[index].natural_name();
+        if taken.insert(slot(&drafts[index], &name)) {
+            names[index] = name;
+        } else {
             duplicates.push(index);
         }
     }
     for index in duplicates {
-        let draft = &mut drafts[index];
-        let file_name = (2..)
-            .map(|number| format!("{} ({number}).{}", draft.stem, draft.extension))
-            .find(|candidate| !taken.contains(&key(&draft.track, candidate)))
+        let draft = &drafts[index];
+        let name = (2..)
+            .map(|number| draft.numbered_name(number))
+            .find(|candidate| !taken.contains(&slot(draft, candidate)))
             .unwrap_or_default();
-        taken.insert(key(&draft.track, &file_name));
-        draft.track.file_name = file_name;
+        taken.insert(slot(draft, &name));
+        names[index] = name;
     }
+    names
+}
 
+/// Maps server tracks to local files in `layout`, sorted by local path. Each track gets its name
+/// in both layouts, so a switch can find the files of the other one. Of the tracks that map to
+/// the same file, the first (by server path, then track number, then id) keeps the name and the
+/// others are numbered (see [`number_collisions`]): within the album folder in the album layout,
+/// across the whole folder in the flat one.
+pub fn plan(items: Vec<Item>, layout: Layout) -> Vec<Track> {
+    let mut drafts: Vec<Draft> = items.into_iter().map(|item| Draft::new(item, layout)).collect();
+
+    let mut by_album: Vec<usize> = (0..drafts.len()).collect();
+    by_album.sort_by(|&a, &b| {
+        let (a, b) = (&drafts[a], &drafts[b]);
+        (&a.track.artist_dir, &a.track.album_dir, a.natural_name(), a.tie_break()).cmp(&(
+            &b.track.artist_dir,
+            &b.track.album_dir,
+            b.natural_name(),
+            b.tie_break(),
+        ))
+    });
+    let album_names = number_collisions(&drafts, &by_album, |draft, name| {
+        (
+            draft.track.artist_dir.clone(),
+            draft.track.album_dir.clone(),
+            name.to_string(),
+        )
+    });
+
+    let mut by_name: Vec<usize> = (0..drafts.len()).collect();
+    by_name.sort_by(|&a, &b| {
+        let (a, b) = (&drafts[a], &drafts[b]);
+        (a.natural_name(), &a.track.artist_dir, &a.track.album_dir, a.tie_break()).cmp(&(
+            b.natural_name(),
+            &b.track.artist_dir,
+            &b.track.album_dir,
+            b.tie_break(),
+        ))
+    });
+    let flat_names = number_collisions(&drafts, &by_name, |_, name| name.to_string());
+
+    for ((draft, album_name), flat_name) in drafts.iter_mut().zip(album_names).zip(flat_names) {
+        draft.track.album_file_name = album_name;
+        draft.track.flat_file_name = flat_name;
+    }
     let mut tracks: Vec<Track> = drafts.into_iter().map(|draft| draft.track).collect();
-    tracks
-        .sort_by(|a, b| (&a.artist_dir, &a.album_dir, &a.file_name).cmp(&(&b.artist_dir, &b.album_dir, &b.file_name)));
+    match layout {
+        Layout::Albums => tracks.sort_by(|a, b| {
+            (&a.artist_dir, &a.album_dir, &a.album_file_name).cmp(&(&b.artist_dir, &b.album_dir, &b.album_file_name))
+        }),
+        Layout::Flat => tracks.sort_by(|a, b| a.flat_file_name.cmp(&b.flat_file_name)),
+    }
     tracks
 }
 
@@ -265,17 +351,20 @@ mod tests {
 
     #[test]
     fn builds_artist_album_title_paths() {
-        let tracks = plan(vec![
-            item(
-                "1",
-                Some("AC/DC"),
-                Some("Back in Black"),
-                Some("Hells Bells"),
-                "/m/1.flac",
-            ),
-            item("2", None, None, None, "/m/2"),
-            item("3", Some(""), Some("  "), Some("???"), "/m/3.ogg"),
-        ]);
+        let tracks = plan(
+            vec![
+                item(
+                    "1",
+                    Some("AC/DC"),
+                    Some("Back in Black"),
+                    Some("Hells Bells"),
+                    "/m/1.flac",
+                ),
+                item("2", None, None, None, "/m/2"),
+                item("3", Some(""), Some("  "), Some("???"), "/m/3.ogg"),
+            ],
+            Layout::Albums,
+        );
         let paths: Vec<String> = tracks.iter().map(Track::relative).collect();
         assert_eq!(
             paths,
@@ -304,8 +393,11 @@ mod tests {
         let mut reversed = items.clone();
         reversed.reverse();
         for input in [items, reversed] {
-            let tracks = plan(input);
-            let names: Vec<(&str, &str)> = tracks.iter().map(|t| (t.id.as_str(), t.file_name.as_str())).collect();
+            let tracks = plan(input, Layout::Albums);
+            let names: Vec<(&str, &str)> = tracks
+                .iter()
+                .map(|t| (t.id.as_str(), t.album_file_name.as_str()))
+                .collect();
             // "a" and "b" share the server path; the id decides. "d" keeps its own name
             // "Song (2)", so the third "Song" becomes "Song (3)".
             assert_eq!(
@@ -317,19 +409,70 @@ mod tests {
                     ("a", "Song.flac")
                 ]
             );
-            assert!(tracks.iter().all(|t| t.flat_name == "Song.flac" || t.id == "d"));
+            // One album, so the flat layout numbers the same way.
+            assert!(tracks.iter().all(|t| t.flat_file_name == t.album_file_name));
         }
     }
 
     #[test]
     fn same_title_on_different_albums_is_no_collision() {
-        let tracks = plan(vec![
-            item("1", Some("A"), Some("One"), Some("Intro"), "/m/1.mp3"),
-            item("2", Some("A"), Some("Two"), Some("Intro"), "/m/2.mp3"),
-            item("3", Some("A"), Some("Two"), Some("Intro"), "/m/2.flac"),
-        ]);
+        let tracks = plan(
+            vec![
+                item("1", Some("A"), Some("One"), Some("Intro"), "/m/1.mp3"),
+                item("2", Some("A"), Some("Two"), Some("Intro"), "/m/2.mp3"),
+                item("3", Some("A"), Some("Two"), Some("Intro"), "/m/2.flac"),
+            ],
+            Layout::Albums,
+        );
         let paths: Vec<String> = tracks.iter().map(Track::relative).collect();
         assert_eq!(paths, ["A/One/Intro.mp3", "A/Two/Intro.flac", "A/Two/Intro.mp3"]);
+    }
+
+    fn library() -> Vec<Item> {
+        vec![
+            item("1", Some("B"), Some("Two"), Some("Intro"), "/m/b.mp3"),
+            item("2", Some("A"), Some("One"), Some("Intro"), "/m/a.mp3"),
+            item("3", Some("A"), Some("One"), Some("Outro"), "/m/c.flac"),
+            item("4", Some("C"), Some("Three"), Some("Intro (2)"), "/m/d.mp3"),
+        ]
+    }
+
+    #[test]
+    fn the_flat_layout_puts_tracks_in_the_music_folder_numbered_across_albums() {
+        let tracks = plan(library(), Layout::Flat);
+        let paths: Vec<(&str, String)> = tracks.iter().map(|t| (t.id.as_str(), t.relative())).collect();
+        // Artist A sorts first, so its "Intro" keeps the name; "Intro (2)" is a real title.
+        assert_eq!(
+            paths,
+            [
+                ("4", "Intro (2).mp3".to_string()),
+                ("1", "Intro (3).mp3".to_string()),
+                ("2", "Intro.mp3".to_string()),
+                ("3", "Outro.flac".to_string()),
+            ]
+        );
+        let mut shuffled = library();
+        shuffled.reverse();
+        assert_eq!(plan(shuffled, Layout::Flat), tracks);
+        assert_eq!(
+            tracks[0].path(Path::new("/home/user/Music")),
+            PathBuf::from("/home/user/Music/Intro (2).mp3")
+        );
+    }
+
+    #[test]
+    fn each_layout_knows_where_the_other_puts_a_track() {
+        let music = Path::new("/home/user/Music");
+        let flat = plan(library(), Layout::Flat);
+        let albums = plan(library(), Layout::Albums);
+        let by_id = |tracks: &[Track], id: &str| tracks.iter().find(|t| t.id == id).cloned().expect("track");
+        for id in ["1", "2", "3", "4"] {
+            let (flat, albums) = (by_id(&flat, id), by_id(&albums, id));
+            assert_eq!(flat.other_path(music), albums.path(music), "{id}");
+            assert_eq!(albums.other_path(music), flat.path(music), "{id}");
+        }
+        assert_eq!(by_id(&albums, "1").relative(), "B/Two/Intro.mp3");
+        assert_eq!(by_id(&albums, "1").other_path(music), music.join("Intro (3).mp3"));
     }
 
     #[test]

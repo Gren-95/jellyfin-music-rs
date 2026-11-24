@@ -24,12 +24,13 @@ pub const GUARD_MIN_FILES: usize = 10;
 pub struct Expected {
     /// The local path of every server track.
     pub tracks: HashSet<PathBuf>,
-    /// The album folders of the tracks that are synced.
+    /// The album folders whose `cover.jpg` stays (none in the flat layout).
     pub album_folders: HashSet<PathBuf>,
     /// The playlist file names to keep, or `None` to leave every `.m3u` alone (playlists off, or
     /// the playlist list could not be read).
     pub playlists: Option<HashSet<String>>,
-    /// Flat-layout files a dry run would have moved into place, which are no longer there then.
+    /// Files of the other layout a dry run would have moved into place, which are no longer there
+    /// then.
     pub moved_away: HashSet<PathBuf>,
 }
 

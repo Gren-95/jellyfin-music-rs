@@ -83,6 +83,11 @@ pub struct SyncArgs {
     #[arg(long)]
     pub no_playlists: bool,
 
+    /// Put every track straight into the music folder as Title.ext, without Artist/Album folders,
+    /// covers or playlists
+    #[arg(long)]
+    pub flat: bool,
+
     /// Refuse to delete more than this percentage of the local tracks (from 10 files on)
     #[arg(long, value_name = "PERCENT", default_value_t = 50, value_parser = clap::value_parser!(u8).range(0..=100))]
     pub max_delete: u8,
@@ -119,6 +124,7 @@ mod tests {
             "--max-delete",
             "100",
             "--json",
+            "--flat",
             "--config",
             "/home/user/conf",
         ])
@@ -131,6 +137,7 @@ mod tests {
             (args.jobs, args.overwrite, args.max_delete, args.json),
             (8, true, 100, true)
         );
+        assert!(args.flat);
         assert!(!args.dry_run && !args.no_covers && !args.no_playlists);
     }
 

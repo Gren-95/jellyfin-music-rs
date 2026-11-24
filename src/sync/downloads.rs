@@ -1,4 +1,4 @@
-//! Getting the tracks in place: moves from the old flat layout, then the downloads, run in
+//! Getting the tracks in place: moves from the other layout, then the downloads, run in
 //! parallel.
 
 use std::collections::HashSet;
@@ -24,9 +24,9 @@ pub(super) struct Job {
     dest: PathBuf,
 }
 
-/// Moves files from the old flat layout into place and decides what to download. Returns the
-/// downloads, whether each track has a local file, and (in a dry run) the flat files that would
-/// have been moved.
+/// Moves files from the other layout into place (the album layout, or the flat one, which the
+/// bash script also used) and decides what to download. Returns the downloads, whether each track
+/// has a local file, and (in a dry run) the files that would have been moved.
 pub(super) fn prepare(
     context: &Context,
     tracks: &[Track],
@@ -42,18 +42,18 @@ pub(super) fn prepare(
         let mut local = fsutil::file_size(&dest);
         let mut moved = false;
         if local.is_none() {
-            let flat = context.dir.join(&track.flat_name);
-            if let Some(size) = fsutil::file_size(&flat)
-                && claimed.insert(flat.clone())
+            let other = track.other_path(&context.dir);
+            if let Some(size) = fsutil::file_size(&other)
+                && claimed.insert(other.clone())
             {
-                match move_into_place(&flat, &dest, options.dry_run) {
+                match move_into_place(&other, &dest, options.dry_run) {
                     Ok(()) => {
                         let verb = if options.dry_run { "Would move" } else { "Moved" };
                         reporter.line(&format!("{verb}: {}", track.label()));
                         local = Some(size);
                         moved = true;
                     }
-                    Err(error) => reporter.warn(&format!("Could not move {}: {error}", flat.display())),
+                    Err(error) => reporter.warn(&format!("Could not move {}: {error}", other.display())),
                 }
             }
         }
@@ -76,14 +76,14 @@ pub(super) fn prepare(
     (jobs, synced, moved_away)
 }
 
-fn move_into_place(flat: &Path, dest: &Path, dry_run: bool) -> std::io::Result<()> {
+fn move_into_place(from: &Path, dest: &Path, dry_run: bool) -> std::io::Result<()> {
     if dry_run {
         return Ok(());
     }
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::rename(flat, dest)
+    fs::rename(from, dest)
 }
 
 pub(super) fn download_all(

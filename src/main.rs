@@ -57,6 +57,7 @@ fn sync(args: SyncArgs, config_path: Option<PathBuf>) -> ExitCode {
         dry_run: args.dry_run,
         covers: !args.no_covers,
         playlists: !args.no_playlists,
+        flat: args.flat,
         max_delete: args.max_delete,
     };
     signal::install();

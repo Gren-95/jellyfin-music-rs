@@ -72,6 +72,7 @@ pub fn write(path: &Path, content: &str) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::fsutil::testdir::TestDir;
+    use crate::layout::Layout;
 
     fn track(artist: &str, title: &str, relative: (&str, &str, &str), ticks: Option<i64>) -> Track {
         Track {
@@ -85,8 +86,9 @@ mod tests {
             size: None,
             artist_dir: relative.0.to_string(),
             album_dir: relative.1.to_string(),
-            file_name: relative.2.to_string(),
-            flat_name: relative.2.to_string(),
+            layout: Layout::Albums,
+            album_file_name: relative.2.to_string(),
+            flat_file_name: relative.2.to_string(),
         }
     }
 

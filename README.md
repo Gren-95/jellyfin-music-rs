@@ -11,6 +11,8 @@ Mirror the music library of your [Jellyfin](https://jellyfin.org) server into a 
 - **Safe on a flaky connection:** downloads resume, a stalled transfer fails instead of hanging,
   and a server that is down or lists nothing changes nothing.
 - **Covers and playlists:** `cover.jpg` per album, and your playlists as `.m3u` files.
+- **Or one flat folder:** with `--flat`, every track sits straight in the music folder, ready
+  for `mpv --shuffle ~/Music/*`.
 - **Made for timers:** one static binary, parallel downloads, a JSON summary and clear exit codes.
 
 Not an official Jellyfin project.
@@ -60,6 +62,7 @@ Music goes to `~/Music` (your `XDG_MUSIC_DIR`), or wherever `--dir` points.
 | `--jobs <n>` | 4 | Downloads at the same time |
 | `--dry-run` | | Show what would happen, change nothing |
 | `--overwrite` | | Download every track and cover again |
+| `--flat` | | Every track straight in the music folder, without covers or playlists |
 | `--no-covers`, `--no-playlists` | | Skip covers or playlists |
 | `--max-delete <percent>` | 50 | Deletion guard, see below |
 | `--json` | | One JSON summary on stdout |
@@ -74,13 +77,15 @@ The config file is `~/.config/jellyfin-music-rs/config`, with `JELLYFIN_URL=…`
 
 1. Only one sync runs at a time, and nothing is touched when the server is unreachable or lists
    no tracks.
-2. Tracks land in `Artist/Album/Title.ext`. Characters that are invalid in file names are dropped,
-   and two tracks with the same name get `Title (2).ext`.
+2. Tracks land in `Artist/Album/Title.ext`, or `Title.ext` with `--flat`. Characters that are
+   invalid in file names are dropped, and two tracks with the same name get `Title (2).ext`.
+   Switching between the two layouts moves the files, so nothing is downloaded again.
 3. Missing tracks are downloaded, and present ones again when their size differs from the
    server's. Downloads go to a `.part` file first, so a failed one never replaces a good copy,
    and the next run resumes it.
 4. `cover.jpg` comes from the album's image, or else from the first track's own image.
-   Playlists are written to `Playlists/<name>.m3u` with relative paths.
+   Playlists are written to `Playlists/<name>.m3u` with relative paths. With `--flat` there are
+   neither, and those of an earlier sync are deleted.
 5. Files the server no longer has are deleted (see below), then empty folders are removed.
 
 If the connection breaks or you press Ctrl-C, running downloads stop, `.part` files are kept and
@@ -88,9 +93,11 @@ nothing is deleted.
 
 ## Deletion
 
-Only files the sync manages are deleted: audio files (`mp3 flac ogg opus m4a wav aac`),
-`cover.jpg` of albums that are gone, stale `.m3u` files in `Playlists/`, and leftover `.part`
-files. Your own files are never touched.
+Jellyfin is the master: every audio file (`mp3 flac ogg opus m4a wav aac`) in the music folder
+that the server doesn't have is deleted, wherever it is in the folder. That includes music you
+put there yourself, so keep music that isn't on the server in another folder. Apart from audio,
+the sync deletes only its own files: `cover.jpg` of albums that are gone, stale `.m3u` files in
+`Playlists/`, and leftover `.part` files. Other files are never touched.
 
 Deletion only happens after a complete run. If it would remove more than `--max-delete` percent of
 your local tracks (and at least 10 files), nothing is deleted and the sync exits with code 8. That
